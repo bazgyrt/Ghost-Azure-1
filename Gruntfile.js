@@ -5,18 +5,33 @@
 // **Usage instructions:** can be found in the [Custom Tasks](#custom%20tasks) section or by running `grunt --help`.
 //
 // **Debug tip:** If you have any problems with any Grunt tasks, try running them with the `--verbose` command
-var _              = require('lodash'),
-    chalk          = require('chalk'),
-    fs             = require('fs-extra'),
-    path           = require('path'),
-    Promise        = require('bluebird'),
-    Git            = require('git-wrapper'),
 
-    escapeChar     = process.platform.match(/^win/) ? '^' : '\\',
-    cwd            = process.cwd().replace(/( |\(|\))/g, escapeChar + '$1'),
+require('./core/server/overrides');
+
+var config = require('./core/server/config'),
+    urlService = require('./core/server/services/url'),
+    _ = require('lodash'),
+    chalk = require('chalk'),
+    fs = require('fs-extra'),
+    KnexMigrator = require('knex-migrator'),
+    knexMigrator = new KnexMigrator({
+        knexMigratorFilePath: config.get('paths:appRoot')
+    }),
+
+    path = require('path'),
+
+    escapeChar = process.platform.match(/^win/) ? '^' : '\\',
+    cwd = process.cwd().replace(/( |\(|\))/g, escapeChar + '$1'),
     buildDirectory = path.resolve(cwd, '.build'),
-    distDirectory  = path.resolve(cwd, '.dist'),
-    emberPath      = path.resolve(cwd + '/core/client/node_modules/.bin/ember'),
+    distDirectory = path.resolve(cwd, '.dist'),
+
+    hasBuiltClient = false,
+    logBuildingClient = function (grunt) {
+        if (!hasBuiltClient) {
+            grunt.log.writeln('Building admin client... (can take ~1min)');
+            setTimeout(logBuildingClient, 5000, grunt);
+        }
+    },
 
     // ## Grunt configuration
 
@@ -40,7 +55,7 @@ var _              = require('lodash'),
             pkg: grunt.file.readJSON('package.json'),
 
             clientFiles: [
-                'server/views/default.hbs',
+                'server/web/admin/views/default.html',
                 'built/assets/ghost.js',
                 'built/assets/ghost.css',
                 'built/assets/vendor.js',
@@ -50,36 +65,28 @@ var _              = require('lodash'),
             // ### grunt-contrib-watch
             // Watch files and livereload in the browser during development.
             // See the [grunt dev](#live%20reload) task for how this is used.
-            watch: {
+            watch: grunt.option('no-server-watch') ? {files: []} : {
                 livereload: {
                     files: [
                         'content/themes/casper/assets/css/*.css',
-                        'content/themes/casper/assets/js/*.js',
-                        'core/built/assets/*.js',
-                        'core/client/dist/index.html'
+                        'content/themes/casper/assets/js/*.js'
                     ],
                     options: {
                         livereload: true
                     }
                 },
                 express: {
-                    files:  ['core/ghost-server.js', 'core/server/**/*.js'],
-                    tasks:  ['express:dev'],
+                    files: ['core/ghost-server.js', 'core/server/**/*.js', 'config.*.json', '!config.testing.json'],
+                    tasks: ['express:dev'],
                     options: {
-                        spawn: false
-                    }
-                },
-                csscomb: {
-                    files: ['core/client/app/styles/**/*.css'],
-                    tasks: ['shell:csscombfix'],
-                    options: {
+                        spawn: false,
                         livereload: true
                     }
                 }
             },
 
             // ### grunt-express-server
-            // Start a Ghost expess server for use in development and testing
+            // Start a Ghost express server for use in development and testing
             express: {
                 options: {
                     script: 'index.js',
@@ -96,42 +103,31 @@ var _              = require('lodash'),
                 }
             },
 
-            // ### grunt-contrib-jshint
+            // ### grunt-eslint
             // Linting rules, run as part of `grunt validate`. See [grunt validate](#validate) and its subtasks for
             // more information.
-            jshint: {
-                options: {
-                    jshintrc: '.jshintrc'
-                },
-
-                server: [
-                    '*.js',
-                    '!config*.js', // note: i added this, do we want this linted?
-                    'core/*.js',
-                    'core/server/**/*.js',
-                    'core/test/**/*.js',
-                    '!core/test/coverage/**',
-                    '!core/shared/vendor/**/*.js'
-                ]
-            },
-
-            jscs: {
-                options: {
-                    config: true
-                },
-
+            eslint: {
                 server: {
-                    files: {
-                        src: [
-                            '*.js',
-                            '!config*.js', // note: i added this, do we want this linted?
-                            'core/*.js',
-                            'core/server/**/*.js',
-                            'core/test/**/*.js',
-                            '!core/test/coverage/**',
-                            '!core/shared/vendor/**/*.js'
-                        ]
-                    }
+                    options: {
+                        config: '.eslintrc.json'
+                    },
+                    src: [
+                        '*.js',
+                        'core/*.js',
+                        'core/server/*.js',
+                        'core/server/**/*.js',
+                        '!core/server/public/**/*.js'
+                    ]
+                },
+                test: {
+                    options: {
+                        config: './core/test/.eslintrc.json'
+                    },
+                    src: [
+                        'core/test/*.js',
+                        'core/test/**/*.js',
+                        '!core/test/coverage/**'
+                    ]
                 }
             },
 
@@ -142,24 +138,23 @@ var _              = require('lodash'),
                 options: {
                     ui: 'bdd',
                     reporter: grunt.option('reporter') || 'spec',
-                    timeout: '15000',
+                    timeout: '30000',
                     save: grunt.option('reporter-output'),
-                    require: ['core/server/overrides']
+                    require: ['core/server/overrides'],
+                    exit: true
                 },
 
                 // #### All Unit tests
                 unit: {
                     src: [
-                        'core/test/unit/**/*_spec.js',
-                        'core/server/apps/**/tests/*_spec.js'
+                        'core/test/unit/**/*_spec.js'
                     ]
                 },
 
                 // #### All Integration tests
                 integration: {
                     src: [
-                        'core/test/integration/**/*_spec.js',
-                        'core/test/integration/*_spec.js'
+                        'core/test/integration/**/*_spec.js'
                     ]
                 },
 
@@ -188,88 +183,78 @@ var _              = require('lodash'),
                 coverage: {
                     // they can also have coverage generated for them & the order doesn't matter
                     src: [
-                        'core/test/unit',
-                        'core/server/apps'
+                        'core/test/unit'
                     ],
                     options: {
                         mask: '**/*_spec.js',
                         coverageFolder: 'core/test/coverage/unit',
-                        mochaOptions: ['--timeout=15000', '--require', 'core/server/overrides'],
+                        mochaOptions: ['--timeout=15000', '--require', 'core/server/overrides', '--exit'],
                         excludes: ['core/client', 'core/server/built']
                     }
                 },
                 coverage_all: {
                     src: [
                         'core/test/integration',
-                        'core/server/apps',
                         'core/test/functional',
                         'core/test/unit'
                     ],
                     options: {
                         coverageFolder: 'core/test/coverage/all',
                         mask: '**/*_spec.js',
-                        mochaOptions: ['--timeout=15000', '--require', 'core/server/overrides'],
+                        mochaOptions: ['--timeout=15000', '--require', 'core/server/overrides', '--exit'],
                         excludes: ['core/client', 'core/server/built']
                     }
 
                 }
             },
 
-            // ### grunt-bg-shell
-            // Used to run ember-cli watch in the background
             bgShell: {
-                ember: {
-                    cmd: emberPath + ' build --watch',
-                    execOpts: {
-                        cwd: path.resolve(cwd + '/core/client/')
+                client: {
+                    cmd: function () {
+                        logBuildingClient(grunt);
+                        return 'grunt subgrunt:watch';
                     },
-                    bg: true,
-                    stdout: function (out) {
-                        grunt.log.writeln(chalk.cyan('Ember-cli::') + out);
+                    bg: grunt.option('client') ? false : true,
+                    stdout: function (chunk) {
+                        // hide certain output to prevent confusion when running alongside server
+                        var filter = grunt.option('client') ? false : [
+                            /> ghost-admin/,
+                            /^Livereload/,
+                            /^Serving on/
+                        ].some(function (regexp) {
+                            return regexp.test(chunk);
+                        });
+
+                        if (!filter) {
+                            grunt.log.write(chunk);
+                        }
+
+                        if (chunk.indexOf('Build successful') !== -1) {
+                            hasBuiltClient = true;
+                        }
                     },
-                    stderror: function (error) {
-                        grunt.log.error(chalk.red('Ember-cli::' + error));
+                    stderr: function (chunk) {
+                        hasBuiltClient = true;
+                        grunt.log.error(chunk);
                     }
                 }
             },
+
             // ### grunt-shell
             // Command line tools where it's easier to run a command directly than configure a grunt plugin
             shell: {
-                ember: {
-                    command: function (mode) {
-                        switch (mode) {
-                            case 'prod':
-                                return emberPath + ' build --environment=production --silent';
-
-                            case 'dev':
-                                return emberPath + ' build';
-
-                            case 'test':
-                                return emberPath + ' test --silent';
-                        }
-                    },
-                    options: {
-                        execOptions: {
-                            cwd: path.resolve(process.cwd() + '/core/client/'),
-                            stdout: false
-                        }
+                master: {
+                    command: function () {
+                        var upstream = grunt.option('upstream') || process.env.GHOST_UPSTREAM || 'upstream';
+                        grunt.log.writeln('Pulling down the latest master from ' + upstream);
+                        return 'git checkout master; git pull ' + upstream + ' master; ' +
+                            'yarn; git submodule foreach "git checkout master && git pull ' +
+                            upstream + ' master"';
                     }
                 },
 
-                shrinkwrap: {
-                    command: 'npm shrinkwrap'
-                },
-
-                prune: {
-                    command: 'npm prune'
-                },
-
-                dedupe: {
-                    command: 'npm dedupe'
-                },
-
-                csscombfix: {
-                    command: path.resolve(cwd + '/node_modules/.bin/csscomb -c core/client/app/styles/csscomb.json -v core/client/app/styles')
+                dbhealth: {
+                    command: 'knex-migrator health'
                 }
             },
 
@@ -282,8 +267,8 @@ var _              = require('lodash'),
                     options: {
                         onlyUpdated: true,
                         exclude: 'node_modules,bower_components,content,core/client,*test,*doc*,' +
-                        '*vendor,config.js,*buil*,.dist*,.idea,.git*,.travis.yml,.bower*,.editorconfig,.js*,*.md',
-                        extras: ['fileSearch']
+                        '*vendor,config.*.json,*buil*,.dist*,.idea,.git*,.travis.yml,.bower*,.editorconfig,.js*,*.md,' +
+                        'MigratorConfig.js'
                     }
                 }
             },
@@ -293,10 +278,7 @@ var _              = require('lodash'),
             clean: {
                 built: {
                     src: [
-                        'core/built/**',
-                        'core/client/dist/**',
-                        'core/client/public/assets/img/contributors/**',
-                        'core/client/app/templates/-contributors.hbs'
+                        'core/built/**'
                     ]
                 },
                 release: {
@@ -329,7 +311,7 @@ var _              = require('lodash'),
             // ### grunt-update-submodules
             // Grunt task to update git submodules
             update_submodules: {
-                default: {
+                pinned: {
                     options: {
                         params: '--init'
                     }
@@ -342,7 +324,18 @@ var _              = require('lodash'),
                         sourceMap: false
                     },
                     files: {
-                        'core/shared/ghost-url.min.js': 'core/shared/ghost-url.js'
+                        'core/server/public/ghost-sdk.min.js': 'core/server/public/ghost-sdk.js'
+                    }
+                }
+            },
+
+            cssnano: {
+                prod: {
+                    options: {
+                        sourcemap: false
+                    },
+                    files: {
+                        'core/server/public/ghost.min.css': 'core/server/public/ghost.css'
                     }
                 }
             },
@@ -350,12 +343,48 @@ var _              = require('lodash'),
             // ### grunt-subgrunt
             // Run grunt tasks in submodule Gruntfiles
             subgrunt: {
-                init: {
-                    'core/client': 'init'
+                options: {
+                    npmInstall: false,
+                    npmPath: 'yarn'
                 },
 
-                lint: {
-                    'core/client': 'lint'
+                init: {
+                    options: {
+                        npmInstall: true
+                    },
+                    projects: {
+                        'core/client': 'init'
+                    }
+                },
+
+                dev: {
+                    'core/client': 'shell:ember:dev'
+                },
+
+                prod: {
+                    'core/client': 'shell:ember:prod'
+                },
+
+                watch: {
+                    projects: {
+                        'core/client': ['shell:ember:watch', '--live-reload-base-url="' + urlService.utils.getSubdir() + '/ghost/"']
+                    }
+                }
+            },
+
+            // ### grunt-contrib-symlink
+            // Create symlink for git hooks
+            symlink: {
+                githooks: {
+                    // Enable overwrite to delete symlinks before recreating them
+                    overwrite: false,
+                    // Enable force to overwrite symlinks outside the current working directory
+                    force: false,
+                    // Expand to all files in /hooks
+                    expand: true,
+                    cwd: '.github/hooks',
+                    src: ['*'],
+                    dest: '.git/hooks'
                 }
             }
         };
@@ -381,19 +410,19 @@ var _              = require('lodash'),
         grunt.registerTask('help',
             'Outputs help information if you type `grunt help` instead of `grunt --help`',
             function () {
-                console.log('Type `grunt --help` to get the details of available grunt tasks.');
+                grunt.log.writeln('Type `grunt --help` to get the details of available grunt tasks.');
             });
 
         // ### Documentation
         // Run `grunt docs` to generate annotated source code using the documentation described in the code comments.
         grunt.registerTask('docs', 'Generate Docs', ['docker']);
 
-        // Runun `grunt watch-docs` to setup livereload & watch whilst you're editing the docs
+        // Run `grunt watch-docs` to setup livereload & watch whilst you're editing the docs
         grunt.registerTask('watch-docs', function () {
             grunt.config.merge({
                 watch: {
                     docs: {
-                        files: ['core/server/**/*', 'index.js', 'Gruntfile.js', 'config.example.js'],
+                        files: ['core/server/**/*', 'index.js', 'Gruntfile.js'],
                         tasks: ['docker'],
                         options: {
                             livereload: true
@@ -423,43 +452,6 @@ var _              = require('lodash'),
                 cfg.express.test.options.node_env = process.env.NODE_ENV;
             });
 
-        // #### Ensure Config *(Utility Task)*
-        // Make sure that we have a `config.js` file when running tests
-        // Ghost requires a `config.js` file to specify the database settings etc. Ghost comes with an example file:
-        // `config.example.js` which is copied and renamed to `config.js` by the bootstrap process
-        grunt.registerTask('ensureConfig', function () {
-            var config = require('./core/server/config'),
-                done = this.async();
-
-            if (!process.env.TEST_SUITE || process.env.TEST_SUITE !== 'client') {
-                config.load().then(function () {
-                    done();
-                }).catch(function (err) {
-                    grunt.fail.fatal(err.stack);
-                });
-            } else {
-                done();
-            }
-        });
-
-        // #### Reset Database to "New" state *(Utility Task)*
-        // Drops all database tables and then runs the migration process to put the database
-        // in a "new" state.
-        grunt.registerTask('cleanDatabase', function () {
-            var done = this.async(),
-                models    = require('./core/server/models'),
-                migration = require('./core/server/data/migration');
-
-            migration.reset().then(function () {
-                models.init();
-                return migration.init();
-            }).then(function () {
-                done();
-            }).catch(function (err) {
-                grunt.fail.fatal(err.stack);
-            });
-        });
-
         // ### Test
         // **Testing utility**
         //
@@ -475,7 +467,7 @@ var _              = require('lodash'),
                 grunt.fail.fatal('No test provided. `grunt test` expects a filename. e.g.: `grunt test:unit/apps_spec.js`. Did you mean `npm test` or `grunt validate`?');
             }
 
-            if (!test.match(/core\/test/)) {
+            if (!test.match(/core\/test/) && !test.match(/core\/server/)) {
                 test = 'core/test/' + test;
             }
 
@@ -501,60 +493,45 @@ var _              = require('lodash'),
             });
         });
 
+        /**
+         * Ensures the target database get's automatically created.
+         */
+        grunt.registerTask('knex-migrator', function () {
+            return knexMigrator.init({noScripts: true});
+        });
+
         // ### Validate
         // **Main testing task**
         //
-        // `grunt validate` will build, lint and test your local Ghost codebase.
-        //
-        // `grunt validate` is one of the most important and useful grunt tasks that we have available to use. It
-        // manages the build of your environment and then calls `grunt test`
-        //
+        // `grunt validate` will either run all tests or run linting
         // `grunt validate` is called by `npm test` and is used by Travis.
-        grunt.registerTask('validate', 'Run tests and lint code', function () {
-            if (process.env.TEST_SUITE === 'server') {
-                grunt.task.run(['stubClientFiles', 'test-server']);
-            } else if (process.env.TEST_SUITE === 'lint') {
-                grunt.task.run(['lint']);
-            } else {
-                grunt.task.run(['validate-all']);
+        grunt.registerTask('validate', 'Run tests or lint code', function () {
+            if (process.env.TEST_SUITE === 'lint') {
+                return grunt.task.run(['lint']);
             }
-        });
 
-        grunt.registerTask('validate-all', 'Lint code and run all tests',
-            ['init', 'lint', 'test-all']);
+            grunt.task.run(['test-all']);
+        });
 
         // ### Test-All
         // **Main testing task**
         //
         // `grunt test-all` will lint and test your pre-built local Ghost codebase.
         //
-        // `grunt test-all` runs all 6 test suites. See the individual sub tasks below for
-        // details of each of the test suites.
-        //
-        grunt.registerTask('test-all', 'Run tests for both server and client',
-            ['test-server', 'test-client']);
-
-        grunt.registerTask('test-server', 'Run server tests',
+        grunt.registerTask('test-all', 'Run all server tests',
             ['test-routes', 'test-module', 'test-unit', 'test-integration']);
-
-        grunt.registerTask('test-client', 'Run client tests',
-            ['test-ember']);
 
         // ### Lint
         //
-        // `grunt lint` will run the linter and the code style checker so you can make sure your code is pretty
-        grunt.registerTask('lint', 'Run the code style checks and linter for server',
-            ['jshint', 'jscs']
-        );
-
-        grunt.registerTask('lint-all', 'Run the code style checks and linter for server and client',
-            ['lint', 'subgrunt:lint']
+        // `grunt lint` will run the linter
+        grunt.registerTask('lint', 'Run the code style checks for server & tests',
+            ['eslint']
         );
 
         // ### test-setup *(utility)(
         // `grunt test-setup` will run all the setup tasks required for running tests
         grunt.registerTask('test-setup', 'Setup ready to run tests',
-            ['clean:test', 'setTestEnv', 'ensureConfig']
+            ['knex-migrator', 'clean:test', 'setTestEnv', 'stubClientFiles']
         );
 
         // ### Unit Tests *(sub task)*
@@ -566,7 +543,7 @@ var _              = require('lodash'),
         //
         // This also works for folders (although it isn't recursive), E.g.
         //
-        // `grunt test:unit/server_helpers`
+        // `grunt test:unit/helpers`
         //
         // Unit tests are run with [mocha](http://mochajs.org/) using
         // [should](https://github.com/visionmedia/should.js) to describe the tests in a highly readable style.
@@ -579,7 +556,7 @@ var _              = require('lodash'),
         // ### Integration tests *(sub task)*
         // `grunt test-integration` will run just the integration tests
         //
-        // Provided you already have a `config.js` file, you can run just the model integration tests by running:
+        // Provided you already have a `config.*.json` file, you can run just the model integration tests by running:
         //
         // `grunt test:integration/model`
         //
@@ -596,8 +573,8 @@ var _              = require('lodash'),
         // `grunt test:integration/api/api_tags_spec.js`
         //
         // Their purpose is to test that both the api and models behave as expected when the database layer is involved.
-        // These tests are run against sqlite3, mysql and pg on travis and ensure that differences between the databases
-        // don't cause bugs. At present, pg often fails and is not officially supported.
+        // These tests are run against sqlite3 and mysql on travis and ensure that differences between the databases
+        // don't cause bugs.
         //
         // A coverage report can be generated for these tests using the `grunt test-coverage` task.
         grunt.registerTask('test-integration', 'Run integration tests (mocha + db access)',
@@ -634,12 +611,6 @@ var _              = require('lodash'),
             ['test-setup', 'mochacli:module']
         );
 
-        // ### Ember unit tests *(sub task)*
-        // `grunt test-ember` will run just the ember unit tests
-        grunt.registerTask('test-ember', 'Run the ember unit tests',
-            ['test-setup', 'shell:ember:test']
-        );
-
         // ### Coverage
         // `grunt coverage` will generate a report for the Unit Tests.
         //
@@ -666,11 +637,11 @@ var _              = require('lodash'),
         grunt.registerTask('master-warn',
             'Outputs a warning to runners of grunt prod, that master shouldn\'t be used for live blogs',
             function () {
-                console.log(chalk.red(
+                grunt.log.writeln(chalk.red(
                     'Use the ' + chalk.bold('stable') + ' branch for live blogs. '
                     + chalk.bold.underline('Never') + ' master!'
                 ));
-                console.log('>', 'Always two there are, no more, no less. A master and a ' + chalk.bold('stable') + '.');
+                grunt.log.writeln('>', 'Always two there are, no more, no less. A master and a ' + chalk.bold('stable') + '.');
             });
 
         // ## Building assets
@@ -684,7 +655,7 @@ var _              = require('lodash'),
         // the Ghost assets in order to make them work.
         //
         // There are a number of grunt tasks available to help with this. Firstly after fetching an updated version of
-        // the Ghost codebase, after running `npm install`, you will need to run [grunt init](#init%20assets).
+        // the Ghost codebase, after running `yarn install`, you will need to run [grunt init](#init%20assets).
         //
         // For production blogs you will need to run [grunt prod](#production%20assets).
         //
@@ -694,30 +665,37 @@ var _              = require('lodash'),
         // ### Init assets
         // `grunt init` - will run an initial asset build for you
         //
-        // Grunt init runs `npm install && bower install` inside `core/client` as well as the standard asset build
+        // Grunt init runs `yarn install && bower install` inside `core/client` as well as the standard asset build
         // tasks which occur when you run just `grunt`. This fetches the latest client-side dependencies.
         //
         // This task is very important, and should always be run when fetching down an updated code base just after
-        // running `npm install`.
+        // running `yarn install`.
         //
         // `bower` does have some quirks, such as not running as root. If you have problems please try running
         // `grunt init --verbose` to see if there are any errors.
         grunt.registerTask('init', 'Prepare the project for development',
-            ['update_submodules', 'subgrunt:init', 'clean:tmp', 'default']);
+            ['update_submodules:pinned', 'subgrunt:init', 'clean:tmp', 'default']);
+
+        // ### Build assets
+        // `grunt build` - will build client assets (without updating the submodule)
+        //
+        // This task is identical to `grunt init`, except it does not build client dependencies
+        grunt.registerTask('build', 'Build client app',
+            ['subgrunt:init', 'clean:tmp', 'default']);
 
         // ### Default asset build
         // `grunt` - default grunt task
         //
         // Build assets and dev version of the admin app.
         grunt.registerTask('default', 'Build JS & templates for development',
-            ['shell:ember:dev']);
+            ['subgrunt:dev']);
 
         // ### Production assets
         // `grunt prod` - will build the minified assets used in production.
         //
         // It is otherwise the same as running `grunt`, but is only used when running Ghost in the `production` env.
         grunt.registerTask('prod', 'Build JS & templates for production',
-            ['shell:ember:prod', 'uglify:prod', 'master-warn']);
+            ['subgrunt:prod', 'uglify:prod', 'cssnano:prod', 'master-warn']);
 
         // ### Live reload
         // `grunt dev` - build assets on the fly whilst developing
@@ -730,86 +708,32 @@ var _              = require('lodash'),
         // frontend code changes.
         //
         // Note that the current implementation of watch only works with casper, not other themes.
-        grunt.registerTask('dev', 'Dev Mode; watch files and restart server on changes',
-           ['bgShell:ember', 'express:dev', 'watch']);
-
-        // ### Contributors
-        // `grunt contributors:<tag-name>` - generate a comma-separated list of contributors for a Ghost release.
-        //
-        // You must supply a tag name to us
-        //
-        grunt.registerTask('contributors', 'Generate a list of contributors for a release', function () {
-            var getContribList = require('gh-contrib-list'),
-                oauthKey = process.env.GITHUB_OAUTH_KEY,
-                thisGit = new Git(),
-                clientGit = new Git({'git-dir': path.resolve(cwd + '/core/client/.git')}),
-                done = this.async();
-
-            function mergeContribs(first, second) {
-                _.each(second, function (contributor) {
-                    var contributorInFirst = _.find(first, ['id', contributor.id]);
-
-                    if (contributorInFirst) {
-                        contributorInFirst.commitCount += contributor.commitCount;
-                    } else {
-                        first.push(contributor);
-                    }
-                });
-
-                return _.orderBy(first, ['commitCount'], ['desc']);
+        grunt.registerTask('dev', 'Dev Mode; watch files and restart server on changes', function () {
+            if (grunt.option('client')) {
+                grunt.task.run(['clean:built', 'bgShell:client']);
+            } else if (grunt.option('server')) {
+                grunt.task.run(['express:dev', 'watch']);
+            } else {
+                grunt.task.run(['clean:built', 'bgShell:client', 'express:dev', 'watch']);
             }
-
-            if (!this.args) {
-                grunt.log.error('You must supply a tag name. Please run like this: `grunt contributors:<tag-name>`');
-            }
-
-            return Promise.props({
-                ghost: Promise.promisify(thisGit.exec, {context: thisGit})('rev-list', {n: 1}, this.args),
-                admin: Promise.promisify(clientGit.exec, {context: clientGit})('rev-list', {n: 1}, this.args)
-            }).then(function (props) {
-                return Promise.join(
-                    getContribList({
-                        user: 'tryghost',
-                        repo: 'ghost',
-                        oauthKey: oauthKey,
-                        commit: props.ghost.trim(),
-                        removeGreenkeeper: true,
-                        retry: true
-                    }),
-                    getContribList({
-                        user: 'tryghost',
-                        repo: 'ghost-admin',
-                        oauthKey: oauthKey,
-                        commit: props.admin.trim(),
-                        removeGreenkeeper: true,
-                        retry: true
-                    })
-                );
-            }).then(function (results) {
-                var contributors = mergeContribs(results[0], results[1]);
-
-                grunt.log.writeln(_.map(contributors, 'name').join(', '));
-                done();
-            }).catch(function (error) {
-                grunt.log.error(error);
-
-                if (error.http_status) {
-                    grunt.log.writeln('GitHub API request returned status: ' + error.http_status);
-                }
-
-                if (error.ratelimit_limit) {
-                    grunt.log.writeln('Rate limit data: limit: %d, remaining: %d, reset: %s', error.ratelimit_limit, error.ratelimit_remaining, require('moment').unix(error.ratelimit_reset).fromNow());
-                }
-
-                done(false);
-            });
         });
+
+        // ### grunt master
+        // This command helps you to bring your working directory back to current master.
+        // It will also update your dependencies to master and shows you if your database is healthy.
+        // It won't build the client!
+        //
+        // `grunt master` [`upstream` is the default upstream to pull from]
+        // `grunt master --upstream=parent`
+        grunt.registerTask('master', 'Update your current working folder to latest master.',
+            ['shell:master', 'subgrunt:init', 'shell:dbhealth']
+        );
 
         // ### Release
         // Run `grunt release` to create a Ghost release zip file.
         // Uses the files specified by `.npmignore` to know what should and should not be included.
-        // Runs the asset generation tasks for both development and production so that the release can be used in
-        // either environment, and packages all the files up into a zip.
+        // Runs the asset generation tasks for production and duplicates default-prod.html to default.html
+        // so it can be run in either production or development, and packages all the files up into a zip.
         grunt.registerTask('release',
             'Release task - creates a final built zip\n' +
             ' - Do our standard build steps \n' +
@@ -829,7 +753,15 @@ var _              = require('lodash'),
                     dest: '<%= paths.releaseBuild %>/'
                 });
 
-                grunt.task.run(['init', 'prod', 'clean:release',  'shell:dedupe', 'shell:prune', 'shell:shrinkwrap', 'copy:release', 'compress:release']);
+                grunt.config.set('copy.admin_html', {
+                    files: [{
+                        cwd: '.',
+                        src: 'core/server/web/admin/views/default-prod.html',
+                        dest: 'core/server/web/admin/views/default.html'
+                    }]
+                });
+
+                grunt.task.run(['update_submodules:pinned', 'subgrunt:init', 'clean:built', 'clean:tmp', 'prod', 'clean:release', 'copy:admin_html', 'copy:release', 'compress:release']);
             }
         );
     };

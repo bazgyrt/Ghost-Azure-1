@@ -1,31 +1,35 @@
 // # Ghost Startup
 // Orchestrates the startup of Ghost when run from command line.
 
-var express,
-    ghost,
-    parentApp,
-    errors;
+var startTime = Date.now(),
+    debug = require('ghost-ignition').debug('boot:index'),
+    ghost, express, common, urlService, parentApp;
 
-require('./core/server/overrides');
+debug('First requires...');
 
-// Make sure dependencies are installed and file system permissions are correct.
-require('./core/server/utils/startup-check').check();
-
-// Proceed with startup
-express = require('express');
 ghost = require('./core');
-errors = require('./core/server/errors');
 
-// Create our parent express app instance.
+debug('Required ghost');
+
+express = require('express');
+common = require('./core/server/lib/common');
+urlService = require('./core/server/services/url');
 parentApp = express();
 
-// Call Ghost to get an instance of GhostServer
+debug('Initialising Ghost');
 ghost().then(function (ghostServer) {
     // Mount our Ghost instance on our desired subdirectory path if it exists.
-    parentApp.use(ghostServer.config.paths.subdir, ghostServer.rootApp);
+    parentApp.use(urlService.utils.getSubdir(), ghostServer.rootApp);
 
+    debug('Starting Ghost');
     // Let Ghost handle starting our server instance.
-    ghostServer.start(parentApp);
+    return ghostServer.start(parentApp)
+        .then(function afterStart() {
+            common.logging.info('Ghost boot', (Date.now() - startTime) / 1000 + 's');
+        });
 }).catch(function (err) {
-    errors.logErrorAndExit(err, err.context, err.help);
+    common.logging.error(err);
+    setTimeout(() => {
+        process.exit(-1);
+    }, 100);
 });
